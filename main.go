@@ -73,7 +73,7 @@ func main() {
 	// set up other http handlers
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/html")
-		fmt.Fprintf(w, `<b>welcome</b> to my relay!`)
+		fmt.Fprintf(w, `Please use a <b>nostr</b> client!`)
 	})
 
 	// start the server
