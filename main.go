@@ -10,6 +10,7 @@ import (
 
 	"github.com/fiatjaf/eventstore/postgresql"
 	"github.com/fiatjaf/khatru"
+	"github.com/fiatjaf/khatru/policies"
 	_ "github.com/lib/pq"
 	"github.com/nbd-wtf/go-nostr/nip86"
 )
@@ -69,6 +70,8 @@ func main() {
 	relay.CountEvents = append(relay.CountEvents, db.CountEvents)
 	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
+
+	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
 
 	// setup management database (second connection for NIP-86)
 	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
