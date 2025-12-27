@@ -1,0 +1,35 @@
+services:
+  server:
+    build:
+      context: .
+      target: final
+    ports:
+      - 3334:3334
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - RELAY_NAME=layer.systems relay
+      - RELAY_PUBKEY=480ec1a7516406090dc042ddf67780ef30f26f3a864e83b417c053a5a611c838
+      - RELAY_DESCRIPTION=this is a public relay
+      - RELAY_ICON=https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Fliquipedia.net%2Fcommons%2Fimages%2F3%2F35%2FSCProbe.jpg&f=1&nofb=1&ipt=0cbbfef25bce41da63d910e86c3c343e6c3b9d63194ca9755351bb7c2efa3359&ipo=images
+  db:
+    image: postgres
+    restart: always
+    user: postgres
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=khatru-relay
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+    # expose:
+    #   - 5432
+    healthcheck:
+      test: [ "CMD", "pg_isready" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db-data:
