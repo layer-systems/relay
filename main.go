@@ -12,6 +12,7 @@ import (
 	"github.com/fiatjaf/khatru"
 	"github.com/fiatjaf/khatru/policies"
 	_ "github.com/lib/pq"
+	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip86"
 )
 
@@ -84,6 +85,22 @@ func main() {
 	if err := initManagementDB(managementDB); err != nil {
 		panic(err)
 	}
+
+	relay.RejectEvent = append(relay.RejectEvent,
+		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
+			var reason string
+			row := managementDB.QueryRowContext(ctx, `SELECT reason FROM banned_pubkeys WHERE pubkey = $1`, event.PubKey)
+			switch err := row.Scan(&reason); err {
+			case sql.ErrNoRows:
+				return false, ""
+			case nil:
+				return true, fmt.Sprintf("pubkey %s banned: %s", event.PubKey, reason)
+			default:
+				// on unexpected DB errors, do not reject the event solely because of the failure
+				return false, ""
+			}
+		},
+	)
 
 	// // there are many other configurable things you can set
 	// relay.RejectEvent = append(relay.RejectEvent,
