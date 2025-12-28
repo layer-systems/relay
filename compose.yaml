@@ -23,8 +23,8 @@ services:
       - POSTGRES_DB=khatru-relay
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_USER=postgres
-    # expose:
-    #   - 5432
+    ports:
+      - 127.0.0.1:5432:5432
     healthcheck:
       test: [ "CMD", "pg_isready" ]
       interval: 10s
