@@ -1,12 +1,19 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/fiatjaf/eventstore/postgresql"
 	"github.com/fiatjaf/khatru"
+	"github.com/fiatjaf/khatru/policies"
+	_ "github.com/lib/pq"
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip86"
 )
 
 func getEnv(key, fallback string) string {
@@ -14,6 +21,34 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func initManagementDB(db *sql.DB) error {
+	// create allowed_pubkeys table
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS allowed_pubkeys (
+			pubkey TEXT PRIMARY KEY,
+			reason TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create allowed_pubkeys table: %w", err)
+	}
+
+	// create banned_pubkeys table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS banned_pubkeys (
+			pubkey TEXT PRIMARY KEY,
+			reason TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create banned_pubkeys table: %w", err)
+	}
+
+	return nil
 }
 
 func main() {
@@ -36,6 +71,36 @@ func main() {
 	relay.CountEvents = append(relay.CountEvents, db.CountEvents)
 	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
+
+	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
+
+	// setup management database (second connection for NIP-86)
+	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
+	if err != nil {
+		panic(err)
+	}
+	defer managementDB.Close()
+
+	// initialize management tables
+	if err := initManagementDB(managementDB); err != nil {
+		panic(err)
+	}
+
+	relay.RejectEvent = append(relay.RejectEvent,
+		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
+			var reason string
+			row := managementDB.QueryRowContext(ctx, `SELECT reason FROM banned_pubkeys WHERE pubkey = $1`, event.PubKey)
+			switch err := row.Scan(&reason); err {
+			case sql.ErrNoRows:
+				return false, ""
+			case nil:
+				return true, fmt.Sprintf("pubkey %s banned: %s", event.PubKey, reason)
+			default:
+				// on unexpected DB errors, do not reject the event solely because of the failure
+				return false, ""
+			}
+		},
+	)
 
 	// // there are many other configurable things you can set
 	// relay.RejectEvent = append(relay.RejectEvent,
@@ -68,6 +133,71 @@ func main() {
 	// 		//  authenticate and then request again)
 	// 	},
 	// )
+
+	// management endpoints
+	relay.ManagementAPI.RejectAPICall = append(relay.ManagementAPI.RejectAPICall,
+		func(ctx context.Context, mp nip86.MethodParams) (reject bool, msg string) {
+			user := khatru.GetAuthed(ctx)
+			ownerPubKey := getEnv("RELAY_PUBKEY", "480ec1a7516406090dc042ddf67780ef30f26f3a864e83b417c053a5a611c838")
+			if user != ownerPubKey {
+				return true, "auth-required: only relay owner can access management API"
+			}
+			return false, ""
+		})
+
+	relay.ManagementAPI.AllowPubKey = func(ctx context.Context, pubkey string, reason string) error {
+		_, err := managementDB.Exec(`
+			INSERT INTO allowed_pubkeys (pubkey, reason, created_at) 
+			VALUES ($1, $2, $3)
+			ON CONFLICT (pubkey) DO UPDATE SET reason = $2, created_at = $3
+		`, pubkey, reason, time.Now())
+		return err
+	}
+
+	relay.ManagementAPI.BanPubKey = func(ctx context.Context, pubkey string, reason string) error {
+		_, err := managementDB.Exec(`
+			INSERT INTO banned_pubkeys (pubkey, reason, created_at) 
+			VALUES ($1, $2, $3)
+			ON CONFLICT (pubkey) DO UPDATE SET reason = $2, created_at = $3
+		`, pubkey, reason, time.Now())
+		return err
+	}
+
+	relay.ManagementAPI.ListAllowedPubKeys = func(ctx context.Context) ([]nip86.PubKeyReason, error) {
+		rows, err := managementDB.Query(`SELECT pubkey, reason FROM allowed_pubkeys ORDER BY created_at DESC`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var result []nip86.PubKeyReason
+		for rows.Next() {
+			var pk nip86.PubKeyReason
+			if err := rows.Scan(&pk.PubKey, &pk.Reason); err != nil {
+				return nil, err
+			}
+			result = append(result, pk)
+		}
+		return result, rows.Err()
+	}
+
+	relay.ManagementAPI.ListBannedPubKeys = func(ctx context.Context) ([]nip86.PubKeyReason, error) {
+		rows, err := managementDB.Query(`SELECT pubkey, reason FROM banned_pubkeys ORDER BY created_at DESC`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var result []nip86.PubKeyReason
+		for rows.Next() {
+			var pk nip86.PubKeyReason
+			if err := rows.Scan(&pk.PubKey, &pk.Reason); err != nil {
+				return nil, err
+			}
+			result = append(result, pk)
+		}
+		return result, rows.Err()
+	}
 
 	mux := relay.Router()
 	// set up other http handlers
