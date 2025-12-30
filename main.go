@@ -350,21 +350,25 @@ func main() {
 			return err
 		}
 
-		// Query and delete the event from the main event store
+		// Query and delete the event from the main event store (if it exists)
 		for _, query := range relay.QueryEvents {
 			ch, err := query(ctx, nostr.Filter{IDs: []string{id}})
 			if err != nil {
 				continue
 			}
-			evt := <-ch
-			if evt != nil {
-				for _, deleter := range relay.DeleteEvent {
-					if err := deleter(ctx, evt); err != nil {
-						return fmt.Errorf("failed to delete event: %w", err)
+
+			// Read all events from the channel and delete them
+			for evt := range ch {
+				if evt != nil {
+					for _, deleter := range relay.DeleteEvent {
+						if err := deleter(ctx, evt); err != nil {
+							return fmt.Errorf("failed to delete event: %w", err)
+						}
 					}
 				}
-				break
 			}
+			// Event successfully deleted or didn't exist - either way, ban is in place
+			break
 		}
 
 		return nil
