@@ -49,6 +49,48 @@ func initManagementDB(db *sql.DB) error {
 		return fmt.Errorf("failed to create banned_pubkeys table: %w", err)
 	}
 
+	// create reports table for NIP-56
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS reports (
+			id TEXT PRIMARY KEY,
+			reporter_pubkey TEXT NOT NULL,
+			reported_event_id TEXT,
+			reported_pubkey TEXT NOT NULL,
+			report_type TEXT NOT NULL,
+			content TEXT,
+			resolved BOOLEAN NOT NULL DEFAULT FALSE,
+			resolution TEXT,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create reports table: %w", err)
+	}
+
+	// create banned_events table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS banned_events (
+			event_id TEXT PRIMARY KEY,
+			reason TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create banned_events table: %w", err)
+	}
+
+	// create allowed_events table
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS allowed_events (
+			event_id TEXT PRIMARY KEY,
+			reason TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create allowed_events table: %w", err)
+	}
+
 	return nil
 }
 
@@ -92,6 +134,42 @@ func main() {
 		panic(err)
 	}
 
+	// Store NIP-56 report events
+	relay.StoreEvent = append(relay.StoreEvent, func(ctx context.Context, event *nostr.Event) error {
+		if event.Kind == 1984 {
+			// Parse report tags
+			var reportedEventId, reportedPubkey, reportType string
+
+			// Extract reported pubkey and type from p tag
+			if pTag := event.Tags.Find("p"); len(pTag) >= 2 {
+				reportedPubkey = pTag[1]
+				if len(pTag) >= 3 {
+					reportType = pTag[2]
+				}
+			}
+
+			// Extract reported event id and type from e tag
+			if eTag := event.Tags.Find("e"); len(eTag) >= 2 {
+				reportedEventId = eTag[1]
+				if len(eTag) >= 3 && reportType == "" {
+					reportType = eTag[2]
+				}
+			}
+
+			if reportedPubkey != "" && reportType != "" {
+				_, err := managementDB.ExecContext(ctx, `
+					INSERT INTO reports (id, reporter_pubkey, reported_event_id, reported_pubkey, report_type, content, created_at)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+					ON CONFLICT (id) DO NOTHING
+				`, event.ID, event.PubKey, reportedEventId, reportedPubkey, reportType, event.Content, time.Unix(int64(event.CreatedAt), 0))
+				if err != nil {
+					return fmt.Errorf("failed to store report: %w", err)
+				}
+			}
+		}
+		return nil
+	})
+
 	relay.RejectEvent = append(relay.RejectEvent,
 		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
 			var reason string
@@ -101,6 +179,23 @@ func main() {
 				return false, ""
 			case nil:
 				return true, fmt.Sprintf("pubkey %s banned: %s", event.PubKey, reason)
+			default:
+				// on unexpected DB errors, do not reject the event solely because of the failure
+				return false, ""
+			}
+		},
+	)
+
+	// Check for banned events
+	relay.RejectEvent = append(relay.RejectEvent,
+		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
+			var reason string
+			row := managementDB.QueryRowContext(ctx, `SELECT reason FROM banned_events WHERE event_id = $1`, event.ID)
+			switch err := row.Scan(&reason); err {
+			case sql.ErrNoRows:
+				return false, ""
+			case nil:
+				return true, fmt.Sprintf("event %s banned: %s", event.ID, reason)
 			default:
 				// on unexpected DB errors, do not reject the event solely because of the failure
 				return false, ""
@@ -186,6 +281,127 @@ func main() {
 				return nil, err
 			}
 			result = append(result, pk)
+		}
+		return result, rows.Err()
+	}
+
+	relay.ManagementAPI.ListEventsNeedingModeration = func(ctx context.Context) ([]nip86.IDReason, error) {
+		rows, err := managementDB.Query(`
+			SELECT COALESCE(reported_event_id, reported_pubkey), 
+			       CONCAT(report_type, ': ', content, ' (reported by ', reporter_pubkey, ')')
+			FROM reports 
+			WHERE resolved = FALSE 
+			ORDER BY created_at DESC
+		`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var result []nip86.IDReason
+		for rows.Next() {
+			var ir nip86.IDReason
+			if err := rows.Scan(&ir.ID, &ir.Reason); err != nil {
+				return nil, err
+			}
+			result = append(result, ir)
+		}
+		return result, rows.Err()
+	}
+
+	relay.ManagementAPI.AllowEvent = func(ctx context.Context, id string, reason string) error {
+		// Mark reports about this event as resolved
+		_, err := managementDB.Exec(`
+			UPDATE reports 
+			SET resolved = TRUE, resolution = $2 
+			WHERE reported_event_id = $1 OR reported_pubkey = $1
+		`, id, "allowed: "+reason)
+		if err != nil {
+			return err
+		}
+
+		// Add to allowed_events table
+		_, err = managementDB.Exec(`
+			INSERT INTO allowed_events (event_id, reason, created_at) 
+			VALUES ($1, $2, $3)
+			ON CONFLICT (event_id) DO UPDATE SET reason = $2, created_at = $3
+		`, id, reason, time.Now())
+		return err
+	}
+
+	relay.ManagementAPI.BanEvent = func(ctx context.Context, id string, reason string) error {
+		// Mark reports about this event as resolved
+		_, err := managementDB.Exec(`
+			UPDATE reports 
+			SET resolved = TRUE, resolution = $2 
+			WHERE reported_event_id = $1 OR reported_pubkey = $1
+		`, id, "banned: "+reason)
+		if err != nil {
+			return err
+		}
+
+		// Add to banned_events table
+		_, err = managementDB.Exec(`
+			INSERT INTO banned_events (event_id, reason, created_at) 
+			VALUES ($1, $2, $3)
+			ON CONFLICT (event_id) DO UPDATE SET reason = $2, created_at = $3
+		`, id, reason, time.Now())
+		if err != nil {
+			return err
+		}
+
+		// Query and delete the event from the main event store
+		for _, query := range relay.QueryEvents {
+			ch, err := query(ctx, nostr.Filter{IDs: []string{id}})
+			if err != nil {
+				continue
+			}
+			evt := <-ch
+			if evt != nil {
+				for _, deleter := range relay.DeleteEvent {
+					if err := deleter(ctx, evt); err != nil {
+						return fmt.Errorf("failed to delete event: %w", err)
+					}
+				}
+				break
+			}
+		}
+
+		return nil
+	}
+
+	relay.ManagementAPI.ListBannedEvents = func(ctx context.Context) ([]nip86.IDReason, error) {
+		rows, err := managementDB.Query(`SELECT event_id, reason FROM banned_events ORDER BY created_at DESC`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var result []nip86.IDReason
+		for rows.Next() {
+			var ir nip86.IDReason
+			if err := rows.Scan(&ir.ID, &ir.Reason); err != nil {
+				return nil, err
+			}
+			result = append(result, ir)
+		}
+		return result, rows.Err()
+	}
+
+	relay.ManagementAPI.ListAllowedEvents = func(ctx context.Context) ([]nip86.IDReason, error) {
+		rows, err := managementDB.Query(`SELECT event_id, reason FROM allowed_events ORDER BY created_at DESC`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var result []nip86.IDReason
+		for rows.Next() {
+			var ir nip86.IDReason
+			if err := rows.Scan(&ir.ID, &ir.Reason); err != nil {
+				return nil, err
+			}
+			result = append(result, ir)
 		}
 		return result, rows.Err()
 	}
