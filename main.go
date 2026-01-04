@@ -119,22 +119,7 @@ func main() {
 	// 	},
 	// )
 
-	// // you can request auth by rejecting an event or a request with the prefix "auth-required: "
-	// relay.RejectFilter = append(relay.RejectFilter,
-	// 	// built-in policies
-	// 	policies.NoComplexFilters,
-
-	// 	// define your own policies
-	// 	func(ctx context.Context, filter nostr.Filter) (reject bool, msg string) {
-	// 		if pubkey := khatru.GetAuthed(ctx); pubkey != "" {
-	// 			log.Printf("request from %s\n", pubkey)
-	// 			return false, ""
-	// 		}
-	// 		return true, "auth-required: only authenticated users can read from this relay"
-	// 		// (this will cause an AUTH message to be sent and then a CLOSED message such that clients can
-	// 		//  authenticate and then request again)
-	// 	},
-	// )
+	relay.RejectFilter = append(relay.RejectFilter, RejectNonAuthenticatedGiftWrapQueries)
 
 	// management endpoints
 	relay.ManagementAPI.RejectAPICall = append(relay.ManagementAPI.RejectAPICall,
