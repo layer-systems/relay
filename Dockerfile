@@ -34,6 +34,20 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
     CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /bin/server .
 
 ################################################################################
+# Create a stage for runtime assets we still want even in a scratch image.
+# We use Alpine only to obtain CA certificates and to generate minimal user files,
+# then copy just those files into the final scratch stage.
+FROM alpine:3.20 AS runtime-assets
+
+# Install CA certs for outbound TLS (HTTPS, WSS, etc.).
+RUN apk --no-cache add ca-certificates
+
+# Create a non-privileged user (copied into scratch via /etc/passwd and /etc/group).
+ARG UID=10001
+RUN addgroup -g "${UID}" appuser \
+    && adduser -D -H -u "${UID}" -G appuser appuser
+
+################################################################################
 # Create a new stage for running the application that contains the minimal
 # runtime dependencies for the application. This often uses a different base
 # image from the build stage where the necessary files are copied from the build
@@ -44,32 +58,19 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
 # most recent version of that image when you build your Dockerfile. If
 # reproducibility is important, consider using a versioned tag
 # (e.g., alpine:3.17.2) or SHA (e.g., alpine@sha256:c41ab5c992deb4fe7e5da09f67a8804a46bd0592bfdf0b1847dde0e0889d2bff).
-FROM alpine:latest AS final
+FROM scratch AS final
 
-# Install any runtime dependencies that are needed to run your application.
-# Leverage a cache mount to /var/cache/apk/ to speed up subsequent builds.
-RUN --mount=type=cache,target=/var/cache/apk \
-    apk --update add \
-        ca-certificates \
-        tzdata \
-        && \
-        update-ca-certificates
-
-# Create a non-privileged user that the app will run under.
-# See https://docs.docker.com/go/dockerfile-user-best-practices/
-ARG UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    appuser
-USER appuser
+# Copy runtime assets into the scratch image.
+COPY --from=runtime-assets /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=runtime-assets /etc/passwd /etc/passwd
+COPY --from=runtime-assets /etc/group /etc/group
 
 # Copy the executable from the "build" stage.
 COPY --from=build /bin/server /bin/
+
+# Run as non-root.
+ARG UID=10001
+USER ${UID}:${UID}
 
 # Expose the port that the application listens on.
 EXPOSE 3334
