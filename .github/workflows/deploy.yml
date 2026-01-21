@@ -1,0 +1,59 @@
+name: Deploy to Production Server
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (not strictly required for remote pull, but useful for metadata)
+        uses: actions/checkout@v4
+
+      - name: Start SSH agent and add key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add known_hosts (recommended)
+        if: ${{ secrets.VPS_KNOWN_HOSTS != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.VPS_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy via SSH
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+          PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          ssh -p "${PORT:-22}" -o StrictHostKeyChecking=yes "${USER}@${HOST}" << 'EOF'
+            set -euo pipefail
+
+            APP_DIR="/root/relay"
+
+            cd "$APP_DIR"
+
+            # ensure we're on the right branch, clean, and updated
+            git fetch --prune
+            git checkout main
+            git reset --hard origin/main
+
+            # pull images (if using remote images), then apply updates
+            docker compose pull
+
+            # bring up updated services
+            docker compose up -d --remove-orphans
+
+            # optional cleanup
+            docker image prune -f
+          EOF
