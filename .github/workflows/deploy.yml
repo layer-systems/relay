@@ -36,7 +36,7 @@ jobs:
           USER: ${{ secrets.VPS_USER }}
           PORT: ${{ secrets.VPS_PORT }}
         run: |
-          ssh -p "${PORT:-22}" -o StrictHostKeyChecking=yes "${USER}@${HOST}" << 'EOF'
+          ssh -p "${PORT:-22}" "${USER}@${HOST}" << 'EOF'
             set -euo pipefail
 
             APP_DIR="/root/relay"
