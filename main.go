@@ -97,7 +97,14 @@ func main() {
 	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
 
-	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind, policies.PreventTimestampsInThePast(600), policies.PreventTimestampsInTheFuture(60))
+	relay.RejectEvent = append(
+		relay.RejectEvent,
+		policies.ValidateKind,
+		policies.PreventTimestampsInThePast(600),
+		policies.PreventTimestampsInTheFuture(60),
+	)
+
+	policies.ApplySaneDefaults(relay)
 
 	relay.RejectEvent = append(relay.RejectEvent,
 		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
