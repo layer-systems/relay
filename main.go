@@ -12,6 +12,7 @@ import (
 	"github.com/fiatjaf/eventstore/postgresql"
 	"github.com/fiatjaf/khatru"
 	"github.com/fiatjaf/khatru/policies"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip86"
@@ -66,27 +67,31 @@ func main() {
 	relay.Info.Version = "0.1.0"
 	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 70, 86}
 
-	// Open shared database connection with aggressive pool limits
-	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
+	// Open shared database connection with proper pool limits
+	dbURL := getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable")
+	managementDB, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		panic(err)
 	}
 	defer managementDB.Close()
 
 	// Configure connection pool to prevent "too many clients" errors
-	managementDB.SetMaxOpenConns(10)                   // Maximum number of open connections
+	// Both the backend and management operations will share this connection pool
+	managementDB.SetMaxOpenConns(25)                  // Maximum number of open connections (shared)
 	managementDB.SetMaxIdleConns(5)                   // Maximum number of idle connections
-	managementDB.SetConnMaxLifetime(3 * time.Minute)  // Maximum lifetime of a connection
-	managementDB.SetConnMaxIdleTime(30 * time.Second) // Maximum idle time of a connection
+	managementDB.SetConnMaxLifetime(5 * time.Minute)  // Maximum lifetime of a connection
+	managementDB.SetConnMaxIdleTime(1 * time.Minute)  // Maximum idle time of a connection
 
 	// Initialize management tables
 	if err := initManagementDB(managementDB); err != nil {
 		panic(err)
 	}
 
-	// Setup event store backend with shared DB connection
+	// Setup event store backend with the shared DB connection
+	// Pass the sqlx wrapper so the backend reuses the same connection pool
 	queryLimit, _ := strconv.Atoi(getEnv("QUERY_LIMIT", "100"))
-	db := postgresql.PostgresBackend{DatabaseURL: getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"), QueryLimit: queryLimit}
+	sqlxDB := sqlx.NewDb(managementDB, "postgres")
+	db := postgresql.PostgresBackend{DB: sqlxDB, QueryLimit: queryLimit}
 	if err := db.Init(); err != nil {
 		panic(err)
 	}
