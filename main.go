@@ -74,7 +74,7 @@ func main() {
 	defer managementDB.Close()
 
 	// Configure connection pool to prevent "too many clients" errors
-	managementDB.SetMaxOpenConns(10)                   // Maximum number of open connections
+	managementDB.SetMaxOpenConns(10)                  // Maximum number of open connections
 	managementDB.SetMaxIdleConns(5)                   // Maximum number of idle connections
 	managementDB.SetConnMaxLifetime(3 * time.Minute)  // Maximum lifetime of a connection
 	managementDB.SetConnMaxIdleTime(30 * time.Second) // Maximum idle time of a connection
@@ -97,7 +97,7 @@ func main() {
 	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
 
-	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
+	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind, policies.PreventTimestampsInThePast(600), policies.PreventTimestampsInTheFuture(60))
 
 	relay.RejectEvent = append(relay.RejectEvent,
 		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
