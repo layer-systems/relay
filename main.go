@@ -63,7 +63,7 @@ func main() {
 	relay.Info.Icon = getEnv("RELAY_ICON", "https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Fliquipedia.net%2Fcommons%2Fimages%2F3%2F35%2FSCProbe.jpg&f=1&nofb=1&ipt=0cbbfef25bce41da63d910e86c3c343e6c3b9d63194ca9755351bb7c2efa3359&ipo=images")
 
 	relay.Info.Software = "https://github.com/layer-systems/relay"
-	relay.Info.Version = "0.1.0"
+	relay.Info.Version = "0.1.1"
 	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 70, 86}
 
 	// Open shared database connection with aggressive pool limits
