@@ -51,6 +51,9 @@ jobs:
             # pull images (if using remote images), then apply updates
             docker compose pull
 
+            # stop existing services to release resources
+            docker compose down
+
             # bring up updated services
             docker compose up -d --remove-orphans
 
