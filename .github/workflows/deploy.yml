@@ -55,7 +55,7 @@ jobs:
             # docker compose down
 
             # bring up updated services
-            docker compose up -d --remove-orphans
+            docker compose up -d --build --remove-orphans
 
             # optional cleanup
             docker image prune -f
