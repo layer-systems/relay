@@ -66,6 +66,25 @@ func main() {
 	relay.Info.Version = "0.1.0"
 	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 70, 86}
 
+	// Open shared database connection with aggressive pool limits
+	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
+	if err != nil {
+		panic(err)
+	}
+	defer managementDB.Close()
+
+	// Configure connection pool to prevent "too many clients" errors
+	managementDB.SetMaxOpenConns(10)                   // Maximum number of open connections
+	managementDB.SetMaxIdleConns(5)                   // Maximum number of idle connections
+	managementDB.SetConnMaxLifetime(3 * time.Minute)  // Maximum lifetime of a connection
+	managementDB.SetConnMaxIdleTime(30 * time.Second) // Maximum idle time of a connection
+
+	// Initialize management tables
+	if err := initManagementDB(managementDB); err != nil {
+		panic(err)
+	}
+
+	// Setup event store backend with shared DB connection
 	queryLimit, _ := strconv.Atoi(getEnv("QUERY_LIMIT", "100"))
 	db := postgresql.PostgresBackend{DatabaseURL: getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"), QueryLimit: queryLimit}
 	if err := db.Init(); err != nil {
@@ -79,18 +98,6 @@ func main() {
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
 
 	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
-
-	// setup management database (second connection for NIP-86)
-	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
-	if err != nil {
-		panic(err)
-	}
-	defer managementDB.Close()
-
-	// initialize management tables
-	if err := initManagementDB(managementDB); err != nil {
-		panic(err)
-	}
 
 	relay.RejectEvent = append(relay.RejectEvent,
 		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
