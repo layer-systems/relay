@@ -52,7 +52,7 @@ jobs:
             docker compose pull
 
             # stop existing services to release resources
-            docker compose down
+            # docker compose down
 
             # bring up updated services
             docker compose up -d --remove-orphans
