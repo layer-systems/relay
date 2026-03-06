@@ -100,8 +100,8 @@ func main() {
 	relay.RejectEvent = append(
 		relay.RejectEvent,
 		policies.ValidateKind,
-		policies.PreventTimestampsInThePast(600),
-		policies.PreventTimestampsInTheFuture(60),
+		// policies.PreventTimestampsInThePast(600),
+		// policies.PreventTimestampsInTheFuture(60),
 		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
 			if event.Kind == 20001 {
 				return true, "kind 20001 events are not allowed"
