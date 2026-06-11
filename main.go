@@ -64,7 +64,7 @@ func main() {
 
 	relay.Info.Software = "https://github.com/layer-systems/relay"
 	relay.Info.Version = "0.1.1"
-	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 70, 86}
+	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 46, 70, 86}
 
 	// Open shared database connection with aggressive pool limits
 	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
