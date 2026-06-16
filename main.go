@@ -64,7 +64,7 @@ func main() {
 
 	relay.Info.Software = "https://github.com/layer-systems/relay"
 	relay.Info.Version = "0.1.1"
-	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 46, 70, 86}
+	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 46, 50, 70, 86}
 
 	// Open shared database connection with aggressive pool limits
 	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
@@ -92,8 +92,8 @@ func main() {
 	}
 
 	relay.StoreEvent = append(relay.StoreEvent, db.SaveEvent)
-	relay.QueryEvents = append(relay.QueryEvents, db.QueryEvents)
-	relay.CountEvents = append(relay.CountEvents, db.CountEvents)
+	relay.QueryEvents = append(relay.QueryEvents, queryEventsWithSearch(&db))
+	relay.CountEvents = append(relay.CountEvents, countEventsWithSearch(&db))
 	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
 
