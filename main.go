@@ -24,6 +24,34 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func getEnvInt(key string, fallback int) int {
+	value := getEnv(key, "")
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		fmt.Printf("invalid %s=%q, using %d\n", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	value := getEnv(key, "")
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		fmt.Printf("invalid %s=%q, using %s\n", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
 func initManagementDB(db *sql.DB) error {
 	// create allowed_pubkeys table
 	_, err := db.Exec(`
@@ -110,7 +138,29 @@ func main() {
 		},
 	)
 
-	policies.ApplySaneDefaults(relay)
+	eventRateTokens := getEnvInt("EVENT_RATE_LIMIT_TOKENS", 20)
+	eventRateInterval := getEnvDuration("EVENT_RATE_LIMIT_INTERVAL", time.Minute)
+	eventRateBurst := getEnvInt("EVENT_RATE_LIMIT_BURST", 100)
+	filterRateTokens := getEnvInt("FILTER_RATE_LIMIT_TOKENS", 100)
+	filterRateInterval := getEnvDuration("FILTER_RATE_LIMIT_INTERVAL", time.Minute)
+	filterRateBurst := getEnvInt("FILTER_RATE_LIMIT_BURST", 500)
+	connectionRateTokens := getEnvInt("CONNECTION_RATE_LIMIT_TOKENS", 20)
+	connectionRateInterval := getEnvDuration("CONNECTION_RATE_LIMIT_INTERVAL", time.Minute)
+	connectionRateBurst := getEnvInt("CONNECTION_RATE_LIMIT_BURST", 200)
+
+	relay.RejectEvent = append(relay.RejectEvent,
+		policies.RejectEventsWithBase64Media,
+		policies.EventIPRateLimiter(eventRateTokens, eventRateInterval, eventRateBurst),
+	)
+
+	relay.RejectFilter = append(relay.RejectFilter,
+		policies.NoComplexFilters,
+		policies.FilterIPRateLimiter(filterRateTokens, filterRateInterval, filterRateBurst),
+	)
+
+	relay.RejectConnection = append(relay.RejectConnection,
+		policies.ConnectionRateLimiter(connectionRateTokens, connectionRateInterval, connectionRateBurst),
+	)
 
 	relay.RejectEvent = append(relay.RejectEvent,
 		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
