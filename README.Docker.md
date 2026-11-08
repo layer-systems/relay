@@ -20,3 +20,11 @@ docs for more detail on building and pushing.
 
 ### References
 * [Docker's Go guide](https://docs.docker.com/language/golang/)
+### Search (NIP-50)
+
+The relay serves NIP-50 search via PostgreSQL full-text search. On first start
+it builds a GIN index over existing events in the background
+(`CREATE INDEX CONCURRENTLY`, the table stays writable). See
+[SEARCH.md](SEARCH.md) for query semantics, the `SEARCH_ENABLED`,
+`SEARCH_INDEX_BUILD` and `SEARCH_TIMEOUT` settings, migration/rollback and
+operational cost.
