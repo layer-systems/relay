@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	successor "fiatjaf.com/nostr"
+	"github.com/fiatjaf/eventstore/postgresql"
+	"os"
+
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr/khatru"
 	"github.com/fiatjaf/eventstore/slicestore"
-	"github.com/fiatjaf/khatru"
-	"github.com/fiatjaf/khatru/policies"
+
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -57,21 +61,31 @@ func giftWrap(t *testing.T, createdAt nostr.Timestamp, recipients ...string) *no
 
 type testRelay struct {
 	url   string
-	store *slicestore.SliceStore
+	store legacyStore
 }
 
 func newTestRelay(t *testing.T) *testRelay {
 	t.Helper()
 	relay := khatru.NewRelay()
-	store := &slicestore.SliceStore{}
-	if err := store.Init(); err != nil {
-		t.Fatal(err)
+	var store legacyStore
+	if url := os.Getenv("TEST_DATABASE_URL"); url != "" {
+		db := &postgresql.PostgresBackend{DatabaseURL: url}
+		if err := db.Init(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(db.Close)
+		if _, err := db.Exec("TRUNCATE event"); err != nil {
+			t.Fatal(err)
+		}
+		store = db
+	} else {
+		db := &slicestore.SliceStore{}
+		if err := db.Init(); err != nil {
+			t.Fatal(err)
+		}
+		store = db
 	}
-	relay.StoreEvent = append(relay.StoreEvent, store.SaveEvent)
-	relay.QueryEvents = append(relay.QueryEvents, store.QueryEvents)
-	relay.CountEvents = append(relay.CountEvents, store.CountEvents)
-	relay.DeleteEvent = append(relay.DeleteEvent, store.DeleteEvent)
-	relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
+	wireStore(relay, store)
 	ProtectGiftWraps(relay)
 
 	server := httptest.NewServer(relay)
@@ -382,15 +396,31 @@ func TestGiftWrapLiveSubscriptions(t *testing.T) {
 func TestCanReadGiftWrap(t *testing.T) {
 	alice, bob := newKeypair(t), newKeypair(t)
 	wrap := giftWrap(t, nostr.Now(), alice.pk)
-	if CanReadGiftWrap("", wrap) || CanReadGiftWrap(bob.pk, wrap) || !CanReadGiftWrap(alice.pk, wrap) {
+	if legacyCanReadGiftWrap("", wrap) || legacyCanReadGiftWrap(bob.pk, wrap) || !legacyCanReadGiftWrap(alice.pk, wrap) {
 		t.Fatal("gift wrap readable by wrong user")
 	}
 	// a "p" tag key without a value must not match the empty pubkey
 	malformed := signedEvent(t, bob, KindGiftWrap, nostr.Tags{{"p"}, {"P", alice.pk}}, nostr.Now())
-	if CanReadGiftWrap("", malformed) || CanReadGiftWrap(alice.pk, malformed) {
+	if legacyCanReadGiftWrap("", malformed) || legacyCanReadGiftWrap(alice.pk, malformed) {
 		t.Fatal("malformed gift wrap readable")
 	}
-	if !CanReadGiftWrap("", signedEvent(t, bob, 1, nil, nostr.Now())) {
+	if !legacyCanReadGiftWrap("", signedEvent(t, bob, 1, nil, nostr.Now())) {
 		t.Fatal("public event not readable")
 	}
+}
+
+func legacyCanReadGiftWrap(authed string, e *nostr.Event) bool {
+	converted, err := convert[*nostr.Event, successor.Event](e)
+	if err != nil {
+		return false
+	}
+	ctx := context.Background()
+	if authed != "" {
+		pk, err := successor.PubKeyFromHex(authed)
+		if err != nil {
+			return false
+		}
+		ctx = khatru.ForceSetAuthed(ctx, pk)
+	}
+	return canRead(ctx, converted)
 }

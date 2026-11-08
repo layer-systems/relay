@@ -4,17 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"iter"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
+	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/khatru"
+	"fiatjaf.com/nostr/khatru/policies"
+	"fiatjaf.com/nostr/nip86"
 	"github.com/fiatjaf/eventstore/postgresql"
-	"github.com/fiatjaf/khatru"
-	"github.com/fiatjaf/khatru/policies"
 	_ "github.com/lib/pq"
-	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip86"
 )
 
 func getEnv(key, fallback string) string {
@@ -58,13 +59,17 @@ func main() {
 
 	// set up some basic properties (will be returned on the NIP-11 endpoint)
 	relay.Info.Name = getEnv("RELAY_NAME", "layer.systems relay")
-	relay.Info.PubKey = getEnv("RELAY_PUBKEY", "480ec1a7516406090dc042ddf67780ef30f26f3a864e83b417c053a5a611c838")
+	owner, err := nostr.PubKeyFromHex(getEnv("RELAY_PUBKEY", "480ec1a7516406090dc042ddf67780ef30f26f3a864e83b417c053a5a611c838"))
+	if err != nil {
+		panic(err)
+	}
+	relay.Info.PubKey = &owner
 	relay.Info.Description = getEnv("RELAY_DESCRIPTION", "this is a public relay")
 	relay.Info.Icon = getEnv("RELAY_ICON", "https://external-content.duckduckgo.com/iu/?u=https%3A%2F%2Fliquipedia.net%2Fcommons%2Fimages%2F3%2F35%2FSCProbe.jpg&f=1&nofb=1&ipt=0cbbfef25bce41da63d910e86c3c343e6c3b9d63194ca9755351bb7c2efa3359&ipo=images")
 
 	relay.Info.Software = "https://github.com/layer-systems/relay"
 	relay.Info.Version = "0.1.1"
-	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 46, 70, 86}
+	relay.Info.SupportedNIPs = []any{1, 11, 17, 42, 46}
 
 	// Open shared database connection with aggressive pool limits
 	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
@@ -91,57 +96,26 @@ func main() {
 		panic(err)
 	}
 
-	relay.StoreEvent = append(relay.StoreEvent, db.SaveEvent)
-	relay.QueryEvents = append(relay.QueryEvents, db.QueryEvents)
-	relay.CountEvents = append(relay.CountEvents, db.CountEvents)
-	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
-	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
-
-	relay.RejectEvent = append(
-		relay.RejectEvent,
-		policies.ValidateKind,
-		// policies.PreventTimestampsInThePast(600),
-		// policies.PreventTimestampsInTheFuture(60),
-		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
-			if event.Kind == 20001 {
-				return true, "kind 20001 events are not allowed"
-			}
-			return false, ""
-		},
-	)
-
-	policies.ApplySaneDefaults(relay)
-
-	relay.RejectEvent = append(relay.RejectEvent,
-		func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
-			var reason string
-			row := managementDB.QueryRowContext(ctx, `SELECT reason FROM banned_pubkeys WHERE pubkey = $1`, event.PubKey)
-			switch err := row.Scan(&reason); err {
-			case sql.ErrNoRows:
-				return false, ""
-			case nil:
-				return true, fmt.Sprintf("pubkey %s banned: %s", event.PubKey, reason)
-			default:
-				// on unexpected DB errors, do not reject the event solely because of the failure
-				return false, ""
-			}
-		},
-	)
-
-	// // there are many other configurable things you can set
-	// relay.RejectEvent = append(relay.RejectEvent,
-	// 	// built-in policies
-	// 	policies.ValidateKind,
-
-	// 	// define your own policies
-	// 	policies.PreventLargeTags(100),
-	// 	func(ctx context.Context, event *nostr.Event) (reject bool, msg string) {
-	// 		if event.PubKey == "fa984bd7dbb282f07e16e7ae87b26a2a7b9b90b7246a44771f0cf5ae58018f52" {
-	// 			return true, "we don't allow this person to write here"
-	// 		}
-	// 		return false, "" // anyone else can
-	// 	},
-	// )
+	wireStore(relay, &db)
+	defer db.Close()
+	relay.StartExpirationManager(func(ctx context.Context, f nostr.Filter) iter.Seq[nostr.Event] { return relay.QueryStored(ctx, f) }, relay.DeleteEvent, nil)
+	relay.OnEvent = func(ctx context.Context, event nostr.Event) (bool, string) {
+		if event.Kind == 20001 {
+			return true, "kind 20001 events are not allowed"
+		}
+		if reject, msg := policies.ValidateKind(ctx, event); reject {
+			return true, msg
+		}
+		var reason string
+		err := managementDB.QueryRowContext(ctx, `SELECT reason FROM banned_pubkeys WHERE pubkey = $1`, event.PubKey.Hex()).Scan(&reason)
+		if err == nil {
+			return true, "restricted: pubkey banned: " + reason
+		}
+		if err != sql.ErrNoRows {
+			return true, "error: ban lookup failed"
+		}
+		return false, ""
+	}
 
 	// NIP-17: only authenticated recipients may read kind 1059 gift wraps
 	// (stored REQ, live subscriptions, COUNT and negentropy).
@@ -149,31 +123,31 @@ func main() {
 	ProtectGiftWraps(relay)
 
 	// management endpoints
-	relay.ManagementAPI.RejectAPICall = append(relay.ManagementAPI.RejectAPICall,
+	relay.ManagementAPI.OnAPICall =
 		func(ctx context.Context, mp nip86.MethodParams) (reject bool, msg string) {
-			user := khatru.GetAuthed(ctx)
+			user, authenticated := khatru.GetAuthed(ctx)
 			ownerPubKey := getEnv("RELAY_PUBKEY", "480ec1a7516406090dc042ddf67780ef30f26f3a864e83b417c053a5a611c838")
-			if user != ownerPubKey {
+			if !authenticated || user.Hex() != ownerPubKey {
 				return true, "auth-required: only relay owner can access management API"
 			}
 			return false, ""
-		})
+		}
 
-	relay.ManagementAPI.AllowPubKey = func(ctx context.Context, pubkey string, reason string) error {
+	relay.ManagementAPI.AllowPubKey = func(ctx context.Context, pubkey nostr.PubKey, reason string) error {
 		_, err := managementDB.Exec(`
 			INSERT INTO allowed_pubkeys (pubkey, reason, created_at) 
 			VALUES ($1, $2, $3)
 			ON CONFLICT (pubkey) DO UPDATE SET reason = $2, created_at = $3
-		`, pubkey, reason, time.Now())
+		`, pubkey.Hex(), reason, time.Now())
 		return err
 	}
 
-	relay.ManagementAPI.BanPubKey = func(ctx context.Context, pubkey string, reason string) error {
+	relay.ManagementAPI.BanPubKey = func(ctx context.Context, pubkey nostr.PubKey, reason string) error {
 		_, err := managementDB.Exec(`
 			INSERT INTO banned_pubkeys (pubkey, reason, created_at) 
 			VALUES ($1, $2, $3)
 			ON CONFLICT (pubkey) DO UPDATE SET reason = $2, created_at = $3
-		`, pubkey, reason, time.Now())
+		`, pubkey.Hex(), reason, time.Now())
 		return err
 	}
 
@@ -187,7 +161,12 @@ func main() {
 		var result []nip86.PubKeyReason
 		for rows.Next() {
 			var pk nip86.PubKeyReason
-			if err := rows.Scan(&pk.PubKey, &pk.Reason); err != nil {
+			var hex string
+			if err := rows.Scan(&hex, &pk.Reason); err != nil {
+				return nil, err
+			}
+			pk.PubKey, err = nostr.PubKeyFromHex(hex)
+			if err != nil {
 				return nil, err
 			}
 			result = append(result, pk)
@@ -205,7 +184,12 @@ func main() {
 		var result []nip86.PubKeyReason
 		for rows.Next() {
 			var pk nip86.PubKeyReason
-			if err := rows.Scan(&pk.PubKey, &pk.Reason); err != nil {
+			var hex string
+			if err := rows.Scan(&hex, &pk.Reason); err != nil {
+				return nil, err
+			}
+			pk.PubKey, err = nostr.PubKeyFromHex(hex)
+			if err != nil {
 				return nil, err
 			}
 			result = append(result, pk)
