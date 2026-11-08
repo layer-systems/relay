@@ -52,9 +52,22 @@ func initManagementDB(db *sql.DB) error {
 	return nil
 }
 
+// supportedNIPs lists the NIPs announced in the NIP-11 document. NIP-50 is
+// advertised only when search is actually served.
+func supportedNIPs(searchEnabled bool) []any {
+	nips := []any{1, 11, 17, 40, 42, 46}
+	if searchEnabled {
+		nips = append(nips, 50)
+	}
+	return append(nips, 70, 86)
+}
+
 func main() {
-	// create the relay instance
-	relay := khatru.NewRelay()
+	// create the relay instance. A router is used so NIP-50 search filters
+	// can be served by a dedicated sub-relay (see search.go); everything
+	// else is handled by router.Relay exactly as before.
+	router := khatru.NewRouter()
+	relay := router.Relay
 
 	// set up some basic properties (will be returned on the NIP-11 endpoint)
 	relay.Info.Name = getEnv("RELAY_NAME", "layer.systems relay")
@@ -64,7 +77,8 @@ func main() {
 
 	relay.Info.Software = "https://github.com/layer-systems/relay"
 	relay.Info.Version = "0.1.1"
-	relay.Info.SupportedNIPs = []any{1, 11, 17, 40, 42, 46, 70, 86}
+	searchEnabled := getEnv("SEARCH_ENABLED", "true") != "false"
+	relay.Info.SupportedNIPs = supportedNIPs(searchEnabled)
 
 	// Open shared database connection with aggressive pool limits
 	managementDB, err := sql.Open("postgres", getEnv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/khatru-relay?sslmode=disable"))
@@ -145,6 +159,44 @@ func main() {
 
 	relay.RejectFilter = append(relay.RejectFilter, RejectNonAuthenticatedGiftWrapQueries)
 
+	// NIP-50 search (PostgreSQL full-text search, see SEARCH.md)
+	if searchEnabled {
+		searchTimeout, err := time.ParseDuration(getEnv("SEARCH_TIMEOUT", "5s"))
+		if err != nil {
+			panic(fmt.Errorf("invalid SEARCH_TIMEOUT: %w", err))
+		}
+		searchStore := &SearchStore{
+			DB:                db.DB,
+			QueryLimit:        db.QueryLimit,
+			QueryIDsLimit:     db.QueryIDsLimit,
+			QueryAuthorsLimit: db.QueryAuthorsLimit,
+			QueryKindsLimit:   db.QueryKindsLimit,
+			QueryTagsLimit:    db.QueryTagsLimit,
+			Timeout:           searchTimeout,
+		}
+		router.Route().Req(isSearchFilter).Relay(newSearchRelay(relay, searchStore))
+
+		switch mode := getEnv("SEARCH_INDEX_BUILD", "background"); mode {
+		case "background":
+			go func() {
+				if err := EnsureSearchIndex(context.Background(), managementDB); err != nil {
+					fmt.Println("search: index build failed:", err)
+				}
+			}()
+		case "sync":
+			if err := EnsureSearchIndex(context.Background(), managementDB); err != nil {
+				panic(fmt.Errorf("search index build failed: %w", err))
+			}
+		case "off":
+			// the operator manages the index manually (see SEARCH.md)
+		default:
+			panic(fmt.Errorf("invalid SEARCH_INDEX_BUILD %q (want background, sync or off)", mode))
+		}
+	} else {
+		relay.RejectFilter = append(relay.RejectFilter, rejectSearchDisabled)
+		relay.RejectCountFilter = append(relay.RejectCountFilter, rejectSearchDisabled)
+	}
+
 	// management endpoints
 	relay.ManagementAPI.RejectAPICall = append(relay.ManagementAPI.RejectAPICall,
 		func(ctx context.Context, mp nip86.MethodParams) (reject bool, msg string) {
@@ -219,5 +271,5 @@ func main() {
 
 	// start the server
 	fmt.Println("running on :3334")
-	http.ListenAndServe(":3334", relay)
+	http.ListenAndServe(":3334", router)
 }
