@@ -143,7 +143,10 @@ func main() {
 	// 	},
 	// )
 
-	relay.RejectFilter = append(relay.RejectFilter, RejectNonAuthenticatedGiftWrapQueries)
+	// NIP-17: only authenticated recipients may read kind 1059 gift wraps
+	// (stored REQ, live subscriptions, COUNT and negentropy).
+	// Must run after every QueryEvents/CountEvents source has been registered.
+	ProtectGiftWraps(relay)
 
 	// management endpoints
 	relay.ManagementAPI.RejectAPICall = append(relay.ManagementAPI.RejectAPICall,

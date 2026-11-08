@@ -24,7 +24,7 @@ func TestNIP46Transport(t *testing.T) {
 		relay.QueryEvents = append(relay.QueryEvents, store.QueryEvents)
 		relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
 		policies.ApplySaneDefaults(relay)
-		relay.RejectFilter = append(relay.RejectFilter, RejectNonAuthenticatedGiftWrapQueries)
+		ProtectGiftWraps(relay)
 
 		server := httptest.NewServer(relay)
 		defer server.Close()
