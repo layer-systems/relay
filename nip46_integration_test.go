@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr/khatru"
+	"fiatjaf.com/nostr/khatru/policies"
 	"github.com/fiatjaf/eventstore/slicestore"
-	"github.com/fiatjaf/khatru"
-	"github.com/fiatjaf/khatru/policies"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -20,10 +20,8 @@ func TestNIP46Transport(t *testing.T) {
 		relay := khatru.NewRelay()
 		store = &slicestore.SliceStore{}
 		store.Init()
-		relay.StoreEvent = append(relay.StoreEvent, store.SaveEvent)
-		relay.QueryEvents = append(relay.QueryEvents, store.QueryEvents)
-		relay.RejectEvent = append(relay.RejectEvent, policies.ValidateKind)
-		policies.ApplySaneDefaults(relay)
+		relay.OnEvent = policies.ValidateKind
+		wireStore(relay, store)
 		ProtectGiftWraps(relay)
 
 		server := httptest.NewServer(relay)
